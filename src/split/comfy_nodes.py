@@ -504,23 +504,33 @@ class TalksplitRepeatImageForAudio:
             raise RuntimeError("ffmpeg not found in PATH. Install ffmpeg and make sure it is accessible.")
 
         try:
+            import comfy.utils
+            pbar = comfy.utils.ProgressBar(n_frames)
+        except Exception:
+            pbar = None
+
+        try:
             denom = max(n_frames - 1, 1)
             if zoom_start == zoom_end:
                 # No zoom: compute frame bytes once, repeat
                 frame_bytes = (frame * 255).to(torch.uint8).numpy().tobytes()
                 for _ in range(n_frames):
                     proc.stdin.write(frame_bytes)
+                    if pbar:
+                        pbar.update(1)
             else:
                 # Ken Burns: compute one zoomed frame at a time, write immediately
                 for i in range(n_frames):
                     zoom = zoom_start + (zoom_end - zoom_start) * (i / denom)
-                    crop_h = max(1, int(H / zoom))
-                    crop_w = max(1, int(W / zoom))
+                    crop_h = max(1, round(H / zoom))
+                    crop_w = max(1, round(W / zoom))
                     top  = (H - crop_h) // 2
                     left = (W - crop_w) // 2
                     t_in = frame[top:top + crop_h, left:left + crop_w, :].permute(2, 0, 1).unsqueeze(0)
                     f = F.interpolate(t_in, size=(H, W), mode="bilinear", align_corners=False).squeeze(0).permute(1, 2, 0)
                     proc.stdin.write((f * 255).to(torch.uint8).numpy().tobytes())
+                    if pbar:
+                        pbar.update(1)
 
             _, stderr_data = proc.communicate()  # closes stdin, waits, reads stderr
         except Exception:
@@ -624,6 +634,12 @@ class TalksplitBuildVideo:
         final_video  = os.path.join(output_dir, f"{prefix}_{rid[:8]}.mp4")
 
         try:
+            import comfy.utils
+            pbar = comfy.utils.ProgressBar(3)
+        except Exception:
+            pbar = None
+
+        try:
             # ── Step 1: concat video segments (bitstream copy, no decode) ──────
             with open(concat_list, "w") as f:
                 for seg_path in segment:
@@ -644,6 +660,8 @@ class TalksplitBuildVideo:
                 except OSError:
                     pass
             os.remove(concat_list)
+            if pbar:
+                pbar.update(1)
 
             # ── Step 2: concatenate audio tensors along time axis (dim=2) ──────
             waveforms = [a["waveform"] for a in audio]
@@ -651,6 +669,8 @@ class TalksplitBuildVideo:
             sr        = audio[0]["sample_rate"]
             torchaudio.save(audio_wav, combined[0], sr)  # [C, T]
             del waveforms, combined
+            if pbar:
+                pbar.update(1)
 
             # ── Step 3: mux audio into video ──────────────────────────────────
             result = subprocess.run(
@@ -665,6 +685,8 @@ class TalksplitBuildVideo:
             )
             if result.returncode != 0:
                 raise RuntimeError(f"ffmpeg mux failed:\n{result.stderr.decode(errors='replace')}")
+            if pbar:
+                pbar.update(1)
 
         finally:
             for p in (concat_list, merged_video, audio_wav):
