@@ -5,7 +5,7 @@ import json
 import sys
 from pathlib import Path
 
-from .boundary import cosine_similarity, depth_scores, threshold_for_sensitivity
+from .boundary import block_similarity, depth_scores, threshold_for_sensitivity
 from .embedder import Embedder
 from .markers import boost_depths
 from .optimizer import optimize_boundaries
@@ -65,6 +65,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Allow paragraph splits at commas, not just sentence ends.",
     )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        default=3,
+        help="Sentences per side for block comparison (default 1 = adjacent pair). "
+             "Increase (e.g. 3) for articles with gradual topic transitions.",
+    )
 
     args = parser.parse_args(argv)
 
@@ -87,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     embedder = Embedder(args.model, device=args.device)
     embeddings = embedder.embed([s.text for s in sentences])
 
-    sim = cosine_similarity(embeddings)
+    sim = block_similarity(embeddings, block_size=args.block_size)
     depths = depth_scores(sim)
     raw_threshold = threshold_for_sensitivity(depths, sensitivity)
 
@@ -108,7 +115,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.plot:
         from .visualize import plot_curve
         plot_curve(sim, depths, splits, raw_threshold, args.plot)
-
 
     if args.format == "json":
         out = json.dumps(

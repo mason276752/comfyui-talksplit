@@ -6,9 +6,10 @@ flexible workflows, plus an Auto node that runs the whole pipeline.
 from __future__ import annotations
 
 import io
+import math
 import re
 
-from .boundary import cosine_similarity, depth_scores, threshold_for_sensitivity
+from .boundary import block_similarity, depth_scores, threshold_for_sensitivity
 from .embedder import Embedder
 from .markers import DEFAULT_MARKERS, boost_depths, parse_markers
 from .optimizer import optimize_boundaries
@@ -77,15 +78,22 @@ class TalksplitEmbed:
 class TalksplitScore:
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {"embeddings": (_T_EMBEDDINGS,)}}
+        return {
+            "required": {"embeddings": (_T_EMBEDDINGS,)},
+            "optional": {
+                "block_size": ("INT", {"default": 1, "min": 1, "max": 20,
+                    "tooltip": "Sentences per side for block comparison. "
+                               "Increase (e.g. 3) for articles with gradual topic transitions."}),
+            },
+        }
 
     RETURN_TYPES = (_T_DEPTHS,)
     RETURN_NAMES = ("depths",)
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, embeddings):
-        sim = cosine_similarity(embeddings)
+    def run(self, embeddings, block_size: int = 1):
+        sim = block_similarity(embeddings, block_size=block_size)
         depths = depth_scores(sim)
         # bundle is (sim, depths, raw_depths_for_threshold). raw == depths until
         # something post-processes (e.g. MarkerBoost) and wants the threshold to
@@ -358,6 +366,42 @@ def _clean_for_tts(text: str) -> str:
     return text.strip()
 
 
+class TalksplitRepeatImageForAudio:
+    """Repeat a single image for exactly as many frames as the audio duration requires.
+
+    Designed to be used inside a per-paragraph list loop:
+      TalksplitSplitToList → ... → IMAGE_i  ┐
+                                   AUDIO_i  ┴→ TalksplitRepeatImageForAudio → [n_frames, H, W, C]
+
+    Then VHS_Unbatch collects all per-paragraph frame batches and concatenates them,
+    and VHS_Unbatch does the same for audio, before feeding into VHS_VideoCombine.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "audio": ("AUDIO",),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("frames",)
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, image, audio, fps: int):
+        import torch
+        duration = audio["waveform"].size(2) / audio["sample_rate"]
+        n_frames = max(1, math.ceil(duration * fps))
+        # image shape: [B, H, W, C] — take first frame if batch > 1
+        frame = image[0:1]
+        repeated = frame.expand(n_frames, -1, -1, -1).clone()
+        return (repeated,)
+
+
 class TalksplitAuto:
     """One-shot node: text in, paragraphs out."""
 
@@ -373,6 +417,9 @@ class TalksplitAuto:
                 "model_name": ("STRING", {"default": "BAAI/bge-m3"}),
                 "use_markers": ("BOOLEAN", {"default": True}),
                 "clause_level": ("BOOLEAN", {"default": False}),
+                "block_size": ("INT", {"default": 1, "min": 1, "max": 20,
+                    "tooltip": "Sentences per side for block comparison. "
+                               "Increase (e.g. 3) for articles with gradual topic transitions."}),
             },
             "optional": {
                 "device": ("STRING", {"default": ""}),
@@ -387,7 +434,7 @@ class TalksplitAuto:
     OUTPUT_NODE = True
 
     def run(self, text, sensitivity, min_sentences, max_sentences, target_paragraphs,
-            model_name, use_markers, clause_level,
+            model_name, use_markers, clause_level, block_size,
             device: str = "", fallback_chunk: int = 30):
         sentences = split_sentences(
             text,
@@ -398,7 +445,7 @@ class TalksplitAuto:
             return {"ui": {"text": [text]}, "result": (text,)}
         embedder = _get_embedder(model_name, device)
         embs = embedder.embed([s.text for s in sentences])
-        sim = cosine_similarity(embs)
+        sim = block_similarity(embs, block_size=block_size)
         dps = depth_scores(sim)
         raw_threshold = threshold_for_sensitivity(dps, sensitivity)
         if use_markers:
@@ -499,6 +546,7 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitSplitToList": TalksplitSplitToList,
     "TalksplitPickParagraph": TalksplitPickParagraph,
     "TalksplitCleanForTTS": TalksplitCleanForTTS,
+    "TalksplitRepeatImageForAudio": TalksplitRepeatImageForAudio,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -513,4 +561,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitSplitToList": "Talksplit · Split to List",
     "TalksplitPickParagraph": "Talksplit · Pick Paragraph",
     "TalksplitCleanForTTS": "Talksplit · Clean for TTS",
+    "TalksplitRepeatImageForAudio": "Talksplit · Repeat Image for Audio",
 }

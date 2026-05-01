@@ -20,6 +20,11 @@ ZH_MARKERS = (
     "以前", "現在開始", "未來", "這時候", "答案",
     # strategy-enumeration openers common in persuasion/presentation
     "最壞的", "次差的",
+    # ordinal section openers: 第一是/第二個/第三點 … 第十
+    "第一", "第二", "第三", "第四", "第五",
+    "第六", "第七", "第八", "第九", "第十",
+    # 其一/其二/其三 form
+    "其一", "其二", "其三", "其四", "其五",
 )
 
 EN_MARKERS = (

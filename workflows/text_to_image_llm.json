@@ -26,7 +26,8 @@
         0,
         "BAAI/bge-m3",
         true,
-        false
+        false,
+        3
       ]
     },
     {

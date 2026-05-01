@@ -22,12 +22,16 @@ _ZH_IMPLICIT_RE = re.compile(
     # Case 1: general discourse markers (must not be at a line start)
     r"(?<=[^\n])(?="
         r"以前(?!從|都|也|已|就)|現在開始|這時候問題|"
-        r"接下來|接著|另外|首先|其次|再來|再者|最後|總之|"
+        r"接下來|接著|另外|首先|其次|再來|再者|最後(?!也)|總之|"
         r"最壞的|次差的|"
         r"答案(?:是|很|：)|而是因為"
     r")"
     # Case 2: 未來 as a discourse opener — not when preceded by 的 (prep phrase)
     r"|(?<=[^\n的])(?=未來)"
+    # Case 3: ordinal enumeration openers 第N是/個/點/層/類/步/項/條/部
+    # Excluded: 第N次/名/年/天/回/輪 — those are NOT section markers.
+    r"|(?<=[^\n])(?=第[一二三四五六七八九十百]+(?=[，、是個點層類步項條部])"
+    r"|其[一二三四五六七八九十]+(?=[，、是]))"
 )
 
 
