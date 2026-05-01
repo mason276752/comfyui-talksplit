@@ -452,51 +452,84 @@ class TalksplitRepeatImageForAudio:
             },
         }
 
-    RETURN_TYPES = ("TEMP_FRAMES",)
-    RETURN_NAMES = ("frames_path",)
+    RETURN_TYPES = ("SEGMENT_VIDEO",)
+    RETURN_NAMES = ("segment_path",)
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
     def run(self, image, audio, fps: int, zoom_start: float, zoom_end: float, index: int = 0):
         import os
+        import subprocess
         import tempfile
+        import uuid
         import torch
         import torch.nn.functional as F
 
         duration = audio["waveform"].size(2) / audio["sample_rate"]
         n_frames = max(1, math.ceil(duration * fps))
 
-        # image shape: [B, H, W, C] — take first frame
-        frame = image[0].cpu()  # [H, W, C]
+        # image shape: [B, H, W, C] — take first frame, clamp to [0,1]
+        frame = image[0].cpu().clamp(0.0, 1.0)  # [H, W, C]
         H, W, C = frame.shape
+
+        # h264 requires even dimensions — crop 1px if needed
+        H_enc = H if H % 2 == 0 else H - 1
+        W_enc = W if W % 2 == 0 else W - 1
+        if H_enc != H or W_enc != W:
+            frame = frame[:H_enc, :W_enc, :]
+            H, W = H_enc, W_enc
 
         # 奇數段落交換 zoom 方向（交替 zoom in / zoom out）
         if zoom_start != zoom_end and index % 2 == 1:
             zoom_start, zoom_end = zoom_end, zoom_start
 
-        if zoom_start == 1.0 and zoom_end == 1.0:
-            # Fast path: contiguous so torch.save only stores 1 frame's storage
-            frames = frame.unsqueeze(0).expand(n_frames, -1, -1, -1).contiguous()
-        else:
-            # Ken Burns: pre-allocate and fill in-place (no double-peak from list+stack)
-            frames = torch.empty(n_frames, H, W, C, dtype=frame.dtype)
-            denom = max(n_frames - 1, 1)
-            for i in range(n_frames):
-                zoom = zoom_start + (zoom_end - zoom_start) * (i / denom)
-                crop_h = max(1, int(H / zoom))
-                crop_w = max(1, int(W / zoom))
-                top  = (H - crop_h) // 2
-                left = (W - crop_w) // 2
-                t_in = frame[top:top + crop_h, left:left + crop_w, :].permute(2, 0, 1).unsqueeze(0)
-                frames[i] = F.interpolate(t_in, size=(H, W), mode="bilinear", align_corners=False).squeeze(0).permute(1, 2, 0)
+        path = os.path.join(tempfile.gettempdir(), f"talksplit_seg_{uuid.uuid4().hex}.mp4")
 
-        # Write to temp file and free memory immediately — the collecting node
-        # (TalksplitConcatImages) will load segments one at a time, so only one
-        # paragraph's frames ever live in RAM simultaneously instead of all N.
-        fd, path = tempfile.mkstemp(suffix=".pt", prefix="talksplit_frames_")
-        os.close(fd)
-        torch.save(frames, path)
-        del frames
+        # Pipe raw RGB24 frames to ffmpeg → h264 mp4 segment.
+        # Peak RAM = 1 frame (~12 MB for 1024²) regardless of n_frames.
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "rawvideo", "-pixel_format", "rgb24",
+            "-video_size", f"{W}x{H}",
+            "-framerate", str(fps),
+            "-i", "pipe:0",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-crf", "18", "-preset", "fast",
+            "-movflags", "+faststart",
+            path,
+        ]
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        except FileNotFoundError:
+            raise RuntimeError("ffmpeg not found in PATH. Install ffmpeg and make sure it is accessible.")
+
+        try:
+            denom = max(n_frames - 1, 1)
+            if zoom_start == zoom_end:
+                # No zoom: compute frame bytes once, repeat
+                frame_bytes = (frame * 255).to(torch.uint8).numpy().tobytes()
+                for _ in range(n_frames):
+                    proc.stdin.write(frame_bytes)
+            else:
+                # Ken Burns: compute one zoomed frame at a time, write immediately
+                for i in range(n_frames):
+                    zoom = zoom_start + (zoom_end - zoom_start) * (i / denom)
+                    crop_h = max(1, int(H / zoom))
+                    crop_w = max(1, int(W / zoom))
+                    top  = (H - crop_h) // 2
+                    left = (W - crop_w) // 2
+                    t_in = frame[top:top + crop_h, left:left + crop_w, :].permute(2, 0, 1).unsqueeze(0)
+                    f = F.interpolate(t_in, size=(H, W), mode="bilinear", align_corners=False).squeeze(0).permute(1, 2, 0)
+                    proc.stdin.write((f * 255).to(torch.uint8).numpy().tobytes())
+
+            _, stderr_data = proc.communicate()  # closes stdin, waits, reads stderr
+        except Exception:
+            proc.kill()
+            proc.wait()
+            raise
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"ffmpeg segment encoding failed:\n{stderr_data.decode(errors='replace')}")
 
         return (path,)
 
@@ -531,6 +564,121 @@ class TalksplitConcatImages:
             os.remove(path)
 
         return (result,)
+
+
+class TalksplitBuildVideo:
+    """Collect per-paragraph video segments and audio, then produce a single MP4.
+
+    Replaces TalksplitConcatImages + TalksplitConcatAudio + VHS_VideoCombine with
+    a streaming pipeline:
+
+      1. ffmpeg concat demuxer  — joins segment .mp4 files via bitstream copy
+         (no decode; negligible RAM and CPU)
+      2. torchaudio.save        — writes concatenated audio to a temp WAV
+         (peak RAM = total audio, typically < 50 MB)
+      3. ffmpeg mux             — combines video + audio into the final .mp4
+
+    Peak RAM during the entire node: ~total audio size (tiny).
+    Disk peak: all segment files + 1 intermediate video + 1 wav + 1 final output.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "segment": ("SEGMENT_VIDEO",),
+                "audio":   ("AUDIO",),
+                "filename_prefix": ("STRING", {"default": "talksplit_video"}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("video_path",)
+    INPUT_IS_LIST = True
+    OUTPUT_NODE = True
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, segment, audio, filename_prefix):
+        import os
+        import subprocess
+        import tempfile
+        import uuid
+        import torch
+        import torchaudio
+
+        # INPUT_IS_LIST wraps widget values in a list too
+        prefix = filename_prefix[0] if isinstance(filename_prefix, list) else filename_prefix
+
+        try:
+            import folder_paths
+            output_dir = folder_paths.get_output_directory()
+        except ImportError:
+            output_dir = tempfile.gettempdir()
+
+        tmp   = tempfile.gettempdir()
+        rid   = uuid.uuid4().hex
+        concat_list  = os.path.join(tmp, f"talksplit_concat_{rid}.txt")
+        merged_video = os.path.join(tmp, f"talksplit_merged_{rid}.mp4")
+        audio_wav    = os.path.join(tmp, f"talksplit_audio_{rid}.wav")
+        final_video  = os.path.join(output_dir, f"{prefix}_{rid[:8]}.mp4")
+
+        try:
+            # ── Step 1: concat video segments (bitstream copy, no decode) ──────
+            with open(concat_list, "w") as f:
+                for seg_path in segment:
+                    f.write(f"file '{seg_path}'\n")
+
+            result = subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", concat_list, "-c", "copy", merged_video],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg concat failed:\n{result.stderr.decode(errors='replace')}")
+
+            # Delete segment files now that they are merged
+            for seg_path in segment:
+                try:
+                    os.remove(seg_path)
+                except OSError:
+                    pass
+            os.remove(concat_list)
+
+            # ── Step 2: concatenate audio tensors along time axis (dim=2) ──────
+            waveforms = [a["waveform"] for a in audio]
+            combined  = torch.cat(waveforms, dim=2)  # [1, C, total_T]
+            sr        = audio[0]["sample_rate"]
+            torchaudio.save(audio_wav, combined[0], sr)  # [C, T]
+            del waveforms, combined
+
+            # ── Step 3: mux audio into video ──────────────────────────────────
+            result = subprocess.run(
+                ["ffmpeg", "-y",
+                 "-i", merged_video,
+                 "-i", audio_wav,
+                 "-c:v", "copy",
+                 "-c:a", "aac", "-b:a", "192k",
+                 "-shortest",
+                 final_video],
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg mux failed:\n{result.stderr.decode(errors='replace')}")
+
+        finally:
+            for p in (concat_list, merged_video, audio_wav):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+
+        print(f"[TalksplitBuildVideo] saved → {final_video}")
+        return {
+            "ui":     {"videos": [{"filename": os.path.basename(final_video),
+                                   "subfolder": "", "type": "output"}]},
+            "result": (final_video,),
+        }
 
 
 class TalksplitAuto:
@@ -684,6 +832,7 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitConcatAudio": TalksplitConcatAudio,
     "TalksplitRepeatImageForAudio": TalksplitRepeatImageForAudio,
     "TalksplitConcatImages": TalksplitConcatImages,
+    "TalksplitBuildVideo": TalksplitBuildVideo,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -702,4 +851,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitConcatAudio": "Talksplit · Concat Audio",
     "TalksplitRepeatImageForAudio": "Talksplit · Repeat Image for Audio",
     "TalksplitConcatImages": "Talksplit · Concat Images",
+    "TalksplitBuildVideo": "Talksplit · Build Video",
 }
