@@ -63,6 +63,52 @@ def test_sentences_node_runs(nodes_module):
     assert text.startswith("你好")
 
 
+def test_split_to_list_node(nodes_module):
+    cls = nodes_module.TalksplitSplitToList
+    paragraphs = "第一段內容。\n\n第二段內容。\n\n第三段內容。"
+    (items,) = cls().run(paragraphs)
+    assert items == ["第一段內容。", "第二段內容。", "第三段內容。"]
+
+
+def test_split_to_list_drops_empty(nodes_module):
+    cls = nodes_module.TalksplitSplitToList
+    (items,) = cls().run("a\n\n\n\nb\n\n   \n\nc")
+    assert items == ["a", "b", "c"]
+
+
+def test_split_to_list_marked_as_list_output(nodes_module):
+    cls = nodes_module.TalksplitSplitToList
+    assert getattr(cls, "OUTPUT_IS_LIST", None) == (True,)
+
+
+def test_pick_paragraph_basic(nodes_module):
+    cls = nodes_module.TalksplitPickParagraph
+    text = "alpha\n\nbeta\n\ngamma"
+    para, count = cls().run(text, 1)
+    assert para == "beta"
+    assert count == 3
+
+
+def test_pick_paragraph_negative_index(nodes_module):
+    cls = nodes_module.TalksplitPickParagraph
+    para, _ = cls().run("alpha\n\nbeta\n\ngamma", -1)
+    assert para == "gamma"
+
+
+def test_pick_paragraph_clamps_out_of_range(nodes_module):
+    cls = nodes_module.TalksplitPickParagraph
+    para, count = cls().run("alpha\n\nbeta", 99)
+    assert para == "beta"
+    assert count == 2
+
+
+def test_pick_paragraph_empty_input(nodes_module):
+    cls = nodes_module.TalksplitPickParagraph
+    para, count = cls().run("", 0)
+    assert para == ""
+    assert count == 0
+
+
 def test_score_optimize_assemble_pipeline_offline(nodes_module):
     """Pipeline from Score onward, fed with synthetic embeddings (no model load)."""
     sentences_cls = nodes_module.TalksplitSentences

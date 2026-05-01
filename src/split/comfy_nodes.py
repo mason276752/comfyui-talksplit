@@ -201,6 +201,65 @@ class TalksplitPlot:
         return (_plot_to_tensor(sim, dps, splits, threshold),)
 
 
+class TalksplitSplitToList:
+    """Split the joined paragraphs STRING into individual items.
+
+    Marked ``OUTPUT_IS_LIST`` so any downstream node (e.g. CLIPTextEncode)
+    runs once per paragraph — the standard ComfyUI pattern for per-item
+    iteration.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "paragraphs": ("STRING", {"multiline": True, "forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("paragraph",)
+    OUTPUT_IS_LIST = (True,)
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, paragraphs: str):
+        items = [p.strip() for p in paragraphs.split("\n\n") if p.strip()]
+        return (items,)
+
+
+class TalksplitPickParagraph:
+    """Pick one paragraph from the joined STRING by index.
+
+    Negative indices count from the end (-1 = last). Out-of-range indices
+    clamp to the valid range. ``count`` reports the total number of
+    paragraphs available so downstream nodes can size loops correctly.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "paragraphs": ("STRING", {"multiline": True, "forceInput": True}),
+                "index": ("INT", {"default": 0, "min": -999, "max": 999}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("paragraph", "count")
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, paragraphs: str, index: int):
+        items = [p.strip() for p in paragraphs.split("\n\n") if p.strip()]
+        if not items:
+            return ("", 0)
+        n = len(items)
+        idx = index if index >= 0 else n + index
+        idx = max(0, min(idx, n - 1))
+        return (items[idx], n)
+
+
 class TalksplitAuto:
     """One-shot node: text in, paragraphs out."""
 
@@ -339,6 +398,8 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitAssemble": TalksplitAssemble,
     "TalksplitPlot": TalksplitPlot,
     "TalksplitAuto": TalksplitAuto,
+    "TalksplitSplitToList": TalksplitSplitToList,
+    "TalksplitPickParagraph": TalksplitPickParagraph,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -350,4 +411,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitAssemble": "Talksplit · Assemble",
     "TalksplitPlot": "Talksplit · Plot",
     "TalksplitAuto": "Talksplit · Auto",
+    "TalksplitSplitToList": "Talksplit · Split to List",
+    "TalksplitPickParagraph": "Talksplit · Pick Paragraph",
 }

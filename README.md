@@ -105,6 +105,13 @@ python INSTALL.py
 - **Talksplit · Assemble** — 依切點把句子組成段落
 - **Talksplit · Plot** — 繪製相似度 / depth 曲線為 `IMAGE`
 
+下游接管用：
+- **Talksplit · Split to List** — 把 `paragraphs` STRING 拆成 list（標記
+  `OUTPUT_IS_LIST=True`），下游每段跑一次。例如 `Auto → Split to List →
+  CLIPTextEncode → KSampler → SaveImage` 會替每段各產一張圖。
+- **Talksplit · Pick Paragraph** — 用 `index` 取出第 N 段，輸出 `paragraph` 和
+  總段數 `count`。負索引（-1 = 最後一段）和越界自動 clamp。
+
 `workflows/` 內附兩個範例：
 - `basic.json` — 只用一顆 Auto 節點
 - `pipeline.json` — 完整細粒度管線含除錯圖

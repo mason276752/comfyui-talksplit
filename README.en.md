@@ -98,6 +98,14 @@ Granular (for custom workflows):
 - **Talksplit · Assemble** — join sentences into paragraphs at chosen splits
 - **Talksplit · Plot** — render similarity/depth curve as `IMAGE`
 
+Downstream helpers:
+- **Talksplit · Split to List** — turn the `paragraphs` STRING into a list
+  (marked `OUTPUT_IS_LIST=True`) so downstream nodes run once per paragraph.
+  Example: `Auto → Split to List → CLIPTextEncode → KSampler → SaveImage`
+  generates one image per paragraph.
+- **Talksplit · Pick Paragraph** — return the Nth paragraph plus the total
+  count. Negative indices count from the end; out-of-range values clamp.
+
 Two example workflows ship in `workflows/`:
 - `basic.json` — single Auto node
 - `pipeline.json` — full granular pipeline with debug plot
