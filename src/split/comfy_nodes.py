@@ -599,6 +599,7 @@ class TalksplitBuildVideo:
                 "segment": ("SEGMENT_VIDEO",),
                 "audio":   ("AUDIO",),
                 "filename_prefix": ("STRING", {"default": "talksplit_video"}),
+                "frame_rate": ("INT", {"default": 24, "min": 1, "max": 120, "step": 1}),
                 "save_output": ("BOOLEAN", {"default": False}),
             }
         }
@@ -610,7 +611,7 @@ class TalksplitBuildVideo:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, segment, audio, filename_prefix, save_output=False):
+    def run(self, segment, audio, filename_prefix, frame_rate=24, save_output=False):
         import os
         import subprocess
         import tempfile
@@ -619,8 +620,9 @@ class TalksplitBuildVideo:
         import torchaudio
 
         # INPUT_IS_LIST wraps widget values in a list too
-        prefix = filename_prefix[0] if isinstance(filename_prefix, list) else filename_prefix
-        save_output = save_output[0] if isinstance(save_output, list) else save_output
+        prefix      = filename_prefix[0] if isinstance(filename_prefix, list) else filename_prefix
+        frame_rate  = frame_rate[0]      if isinstance(frame_rate, list)      else frame_rate
+        save_output = save_output[0]     if isinstance(save_output, list)     else save_output
 
         try:
             import folder_paths
@@ -705,8 +707,11 @@ class TalksplitBuildVideo:
 
         print(f"[TalksplitBuildVideo] saved → {final_video}")
         return {
-            "ui":     {"videos": [{"filename": os.path.basename(final_video),
-                                   "subfolder": "", "type": dest_type}]},
+            "ui": {"gifs": [{"filename": os.path.basename(final_video),
+                             "subfolder": "",
+                             "type": dest_type,
+                             "format": "video/h264-mp4",
+                             "frame_rate": frame_rate}]},
             "result": (final_video,),
         }
 
