@@ -452,12 +452,14 @@ class TalksplitRepeatImageForAudio:
             },
         }
 
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("frames",)
+    RETURN_TYPES = ("TEMP_FRAMES",)
+    RETURN_NAMES = ("frames_path",)
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
     def run(self, image, audio, fps: int, zoom_start: float, zoom_end: float, index: int = 0):
+        import os
+        import tempfile
         import torch
         import torch.nn.functional as F
 
@@ -465,7 +467,7 @@ class TalksplitRepeatImageForAudio:
         n_frames = max(1, math.ceil(duration * fps))
 
         # image shape: [B, H, W, C] — take first frame
-        frame = image[0]  # [H, W, C]
+        frame = image[0].cpu()  # [H, W, C]
         H, W, C = frame.shape
 
         # 奇數段落交換 zoom 方向（交替 zoom in / zoom out）
@@ -473,26 +475,62 @@ class TalksplitRepeatImageForAudio:
             zoom_start, zoom_end = zoom_end, zoom_start
 
         if zoom_start == 1.0 and zoom_end == 1.0:
-            # Fast path: no zoom, just repeat
-            repeated = frame.unsqueeze(0).expand(n_frames, -1, -1, -1).clone()
-            return (repeated,)
+            # Fast path: contiguous so torch.save only stores 1 frame's storage
+            frames = frame.unsqueeze(0).expand(n_frames, -1, -1, -1).contiguous()
+        else:
+            # Ken Burns: pre-allocate and fill in-place (no double-peak from list+stack)
+            frames = torch.empty(n_frames, H, W, C, dtype=frame.dtype)
+            denom = max(n_frames - 1, 1)
+            for i in range(n_frames):
+                zoom = zoom_start + (zoom_end - zoom_start) * (i / denom)
+                crop_h = max(1, int(H / zoom))
+                crop_w = max(1, int(W / zoom))
+                top  = (H - crop_h) // 2
+                left = (W - crop_w) // 2
+                t_in = frame[top:top + crop_h, left:left + crop_w, :].permute(2, 0, 1).unsqueeze(0)
+                frames[i] = F.interpolate(t_in, size=(H, W), mode="bilinear", align_corners=False).squeeze(0).permute(1, 2, 0)
 
-        # Ken Burns: interpolate zoom factor per frame, crop centre, resize
-        frames = []
-        for i in range(n_frames):
-            t = i / max(n_frames - 1, 1)
-            zoom = zoom_start + (zoom_end - zoom_start) * t
-            crop_h = max(1, int(H / zoom))
-            crop_w = max(1, int(W / zoom))
-            top  = (H - crop_h) // 2
-            left = (W - crop_w) // 2
-            cropped = frame[top:top + crop_h, left:left + crop_w, :]  # [ch, cw, C]
-            # [1, C, ch, cw] → interpolate → [1, C, H, W]
-            t_in = cropped.permute(2, 0, 1).unsqueeze(0)
-            t_out = F.interpolate(t_in, size=(H, W), mode="bilinear", align_corners=False)
-            frames.append(t_out.squeeze(0).permute(1, 2, 0))
+        # Write to temp file and free memory immediately — the collecting node
+        # (TalksplitConcatImages) will load segments one at a time, so only one
+        # paragraph's frames ever live in RAM simultaneously instead of all N.
+        fd, path = tempfile.mkstemp(suffix=".pt", prefix="talksplit_frames_")
+        os.close(fd)
+        torch.save(frames, path)
+        del frames
 
-        return (torch.stack(frames),)
+        return (path,)
+
+
+class TalksplitConcatImages:
+    """Collect per-paragraph temp frame files and concatenate them into one IMAGE tensor.
+
+    Designed to replace VHS_Unbatch in the video pipeline.  Loads each segment
+    sequentially and deletes the temp file immediately after loading, so peak
+    memory equals (accumulated result) + (one segment), rather than all segments
+    simultaneously.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"frames_path": ("TEMP_FRAMES",)}}
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("images",)
+    INPUT_IS_LIST = True
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, frames_path):
+        import os
+        import torch
+
+        result = None
+        for path in frames_path:
+            chunk = torch.load(path, map_location="cpu", weights_only=True)
+            result = chunk if result is None else torch.cat([result, chunk], dim=0)
+            os.remove(path)
+
+        return (result,)
 
 
 class TalksplitAuto:
@@ -642,6 +680,7 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitTrimSilence": TalksplitTrimSilence,
     "TalksplitConcatAudio": TalksplitConcatAudio,
     "TalksplitRepeatImageForAudio": TalksplitRepeatImageForAudio,
+    "TalksplitConcatImages": TalksplitConcatImages,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -659,4 +698,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitTrimSilence": "Talksplit · Trim Silence",
     "TalksplitConcatAudio": "Talksplit · Concat Audio",
     "TalksplitRepeatImageForAudio": "Talksplit · Repeat Image for Audio",
+    "TalksplitConcatImages": "Talksplit · Concat Images",
 }
