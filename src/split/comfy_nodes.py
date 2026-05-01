@@ -366,6 +366,30 @@ def _clean_for_tts(text: str) -> str:
     return text.strip()
 
 
+class TalksplitConcatAudio:
+    """Concatenate a list of AUDIO objects along the time axis (dim=2).
+
+    VHS_Unbatch uses torch.cat(dim=0) which fails when audio segments have
+    different lengths. This node concatenates along the samples dimension.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"audio": ("AUDIO",)}}
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    INPUT_IS_LIST = True
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, audio):
+        import torch
+        waveforms = [a["waveform"] for a in audio]
+        combined = torch.cat(waveforms, dim=2)
+        return ({"waveform": combined, "sample_rate": audio[0]["sample_rate"]},)
+
+
 class TalksplitRepeatImageForAudio:
     """Repeat a single image for exactly as many frames as the audio duration requires.
 
@@ -546,6 +570,7 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitSplitToList": TalksplitSplitToList,
     "TalksplitPickParagraph": TalksplitPickParagraph,
     "TalksplitCleanForTTS": TalksplitCleanForTTS,
+    "TalksplitConcatAudio": TalksplitConcatAudio,
     "TalksplitRepeatImageForAudio": TalksplitRepeatImageForAudio,
 }
 
@@ -561,5 +586,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitSplitToList": "Talksplit · Split to List",
     "TalksplitPickParagraph": "Talksplit · Pick Paragraph",
     "TalksplitCleanForTTS": "Talksplit · Clean for TTS",
+    "TalksplitConcatAudio": "Talksplit · Concat Audio",
     "TalksplitRepeatImageForAudio": "Talksplit · Repeat Image for Audio",
 }
