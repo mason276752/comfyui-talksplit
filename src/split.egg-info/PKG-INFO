@@ -1,0 +1,12 @@
+Metadata-Version: 2.4
+Name: split
+Version: 0.1.0
+Summary: Split speech transcripts into semantically coherent paragraphs.
+Requires-Python: >=3.10
+Requires-Dist: sentence-transformers>=3.0
+Requires-Dist: numpy>=1.24
+Provides-Extra: plot
+Requires-Dist: matplotlib>=3.7; extra == "plot"
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+Requires-Dist: matplotlib>=3.7; extra == "dev"

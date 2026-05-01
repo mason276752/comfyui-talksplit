@@ -1,0 +1,38 @@
+{
+  "last_node_id": 1,
+  "last_link_id": 0,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "TalksplitAuto",
+      "pos": [240, 240],
+      "size": [480, 420],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [
+        {"name": "device", "type": "STRING", "link": null, "shape": 7},
+        {"name": "fallback_chunk", "type": "INT", "link": null, "shape": 7}
+      ],
+      "outputs": [
+        {"name": "paragraphs", "type": "STRING", "links": null, "shape": 3, "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "TalksplitAuto"},
+      "widgets_values": [
+        "貼上你的講稿。\n句子用標點分；段落由模型決定。",
+        1.0,
+        2,
+        15,
+        0,
+        "BAAI/bge-m3",
+        "",
+        30
+      ]
+    }
+  ],
+  "links": [],
+  "groups": [],
+  "config": {},
+  "extra": {},
+  "version": 0.4
+}

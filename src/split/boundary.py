@@ -1,0 +1,49 @@
+from __future__ import annotations
+
+import numpy as np
+
+
+def cosine_similarity(embeddings: np.ndarray) -> np.ndarray:
+    """Adjacent-pair cosine similarity. Embeddings must be L2-normalized."""
+    if len(embeddings) < 2:
+        return np.zeros(0, dtype=np.float32)
+    return np.sum(embeddings[:-1] * embeddings[1:], axis=1).astype(np.float32)
+
+
+def depth_scores(sim: np.ndarray) -> np.ndarray:
+    """TextTiling-style depth score for each gap.
+
+    For gap i, walk outward until the similarity stops climbing on each side;
+    the highest values seen are the local peaks. depth = (left_peak - sim[i])
+    + (right_peak - sim[i]). Higher depth = stronger boundary candidate.
+    """
+    n = len(sim)
+    depths = np.zeros(n, dtype=np.float32)
+    for i in range(n):
+        left_peak = sim[i]
+        for j in range(i - 1, -1, -1):
+            if sim[j] >= left_peak:
+                left_peak = sim[j]
+            else:
+                break
+        right_peak = sim[i]
+        for j in range(i + 1, n):
+            if sim[j] >= right_peak:
+                right_peak = sim[j]
+            else:
+                break
+        depths[i] = (left_peak - sim[i]) + (right_peak - sim[i])
+    return depths
+
+
+def threshold_for_sensitivity(depths: np.ndarray, sensitivity: float) -> float:
+    """Map sensitivity (0–2) to a depth threshold via mean + k*std.
+
+    sensitivity 1.0 → k=1.0 (cuts deep valleys only, ~conservative)
+    sensitivity 2.0 → k=0.0 (cuts at every above-mean valley, aggressive)
+    sensitivity 0.5 → k=1.5 (very conservative)
+    """
+    if len(depths) == 0:
+        return 0.0
+    k = max(0.0, 2.0 - sensitivity)
+    return float(depths.mean() + k * depths.std())
