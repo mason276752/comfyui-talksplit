@@ -16,6 +16,10 @@ ZH_MARKERS = (
     "接下來", "接著", "另外", "首先", "其次", "再來", "再者",
     "最後", "總之", "換個話題", "順便", "至於", "話說", "對了",
     "說到", "反過來", "另一方面",
+    # temporal / contrast transitions common in presentations
+    "以前", "現在開始", "未來", "這時候", "答案",
+    # strategy-enumeration openers common in persuasion/presentation
+    "最壞的", "次差的",
 )
 
 EN_MARKERS = (
@@ -48,12 +52,13 @@ def boost_depths(
     depths: np.ndarray,
     markers: Sequence[str] = DEFAULT_MARKERS,
     bonus: float | None = None,
+    threshold: float | None = None,
 ) -> np.ndarray:
     """Add a bonus to ``depths`` at gaps preceding marker-tagged sentences.
 
-    ``bonus`` defaults to one standard deviation of the depth distribution,
-    which is enough to push a borderline-below-threshold gap above it without
-    swamping naturally-deep valleys.
+    ``bonus`` defaults to one standard deviation of the depth distribution.
+    If ``threshold`` is provided, each boosted gap is raised to at least
+    ``threshold + eps`` so it always becomes a split candidate in the optimizer.
     """
     if len(depths) == 0:
         return depths
@@ -62,7 +67,10 @@ def boost_depths(
     boosted = depths.astype(np.float32, copy=True)
     for gap in find_marker_gaps(sentences, markers):
         if 0 <= gap < len(boosted):
-            boosted[gap] = boosted[gap] + bonus
+            val = boosted[gap] + bonus
+            if threshold is not None:
+                val = max(val, threshold + 1e-5)
+            boosted[gap] = val
     return boosted
 
 

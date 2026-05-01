@@ -6,6 +6,7 @@ flexible workflows, plus an Auto node that runs the whole pipeline.
 from __future__ import annotations
 
 import io
+import re
 
 from .boundary import cosine_similarity, depth_scores, threshold_for_sensitivity
 from .embedder import Embedder
@@ -102,6 +103,7 @@ class TalksplitMarkerBoost:
             "required": {
                 "sentences": (_T_SENTENCES,),
                 "depths": (_T_DEPTHS,),
+                "sensitivity": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
             },
             "optional": {
                 "custom_markers": ("STRING", {
@@ -117,10 +119,11 @@ class TalksplitMarkerBoost:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, sentences, depths, custom_markers: str = ""):
+    def run(self, sentences, depths, sensitivity: float = 1.0, custom_markers: str = ""):
         sim, dps, raw = _unpack_depths(depths)
         markers = parse_markers(custom_markers) if custom_markers.strip() else DEFAULT_MARKERS
-        boosted = boost_depths(sentences, dps, markers=markers)
+        threshold = threshold_for_sensitivity(raw, sensitivity)
+        boosted = boost_depths(sentences, dps, markers=markers, threshold=threshold)
         return ((sim, boosted, raw),)
 
 
@@ -260,6 +263,101 @@ class TalksplitPickParagraph:
         return (items[idx], n)
 
 
+class TalksplitCleanForTTS:
+    """Remove characters that confuse TTS engines: brackets, special quotes,
+    colons, ellipses, dashes, and other non-speech symbols.
+    Natural speech punctuation (。！？，；、) is preserved."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "text": ("STRING", {"multiline": True, "forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, text: str):
+        return (_clean_for_tts(text),)
+
+
+# Step 1: characters that map to a pause rather than being deleted outright,
+# so clause rhythm is preserved in the output audio.
+_TTS_PAUSE_RE = re.compile(
+    r"[\u2026\u22ef\u2025]+"          # … ⋯ ‥  (ellipsis variants)
+    r"|[\u2014\u2015\u2013\u2012]+"   # — ― – ‒  (dash variants)
+    r"|[\uff1a\u003a\uff0f\u002f]"    # ：: /／  (colon / slash)
+)
+
+# Step 2a: convert enclosed/circled numbers (①→1, ⑩→10, ⑴→1 …) to digits
+# so "第①類" → "第1類" rather than "第類".
+_ENCLOSED_NUM: dict[int, str] = {}
+for _i, _base in enumerate(range(0x2460, 0x2474), 1):   # ①–⑳  (1–20)
+    _ENCLOSED_NUM[_base] = str(_i)
+for _i, _base in enumerate(range(0x2474, 0x2488), 1):   # ⑴–⒇  (1–20)
+    _ENCLOSED_NUM[_base] = str(_i)
+for _i, _base in enumerate(range(0x2488, 0x249c), 1):   # ⒈–⒛  (1–20)
+    _ENCLOSED_NUM[_base] = str(_i)
+for _i, _base in enumerate(range(0x24b6, 0x24d0), 65):  # Ⓐ–Ⓩ  → A–Z
+    _ENCLOSED_NUM[_base] = chr(_i)
+for _i, _base in enumerate(range(0x24d0, 0x24ea), 97):  # ⓐ–ⓩ  → a–z
+    _ENCLOSED_NUM[_base] = chr(_i)
+
+
+def _normalize_enclosed(text: str) -> str:
+    out = []
+    for ch in text:
+        out.append(_ENCLOSED_NUM.get(ord(ch), ch))
+    return "".join(out)
+
+
+# Step 2b: full-width ASCII (Ａ→A, １→1) so the whitelist below catches them.
+def _halfwidth(text: str) -> str:
+    out = []
+    for ch in text:
+        cp = ord(ch)
+        if 0xFF01 <= cp <= 0xFF5E:   # full-width ASCII variants block
+            out.append(chr(cp - 0xFEE0))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+# Step 3: whitelist — anything NOT matching is stripped.
+# Kept: CJK characters, Latin letters, digits, spaces, newlines,
+#       and the small set of punctuation that TTS reads as natural pauses.
+_TTS_SAFE_RE = re.compile(
+    r"[^"
+    r"\u4e00-\u9fff"        # CJK Unified Ideographs (main block)
+    r"\u3400-\u4dbf"        # CJK Extension A
+    r"\uf900-\ufaff"        # CJK Compatibility Ideographs
+    r"A-Za-z0-9 \n"         # Latin, digits, space, newline
+    r"\u3002"               # 。
+    r"\uff01"               # ！
+    r"\uff1f"               # ？
+    r"\uff0c"               # ，
+    r"\uff1b"               # ；
+    r"\u3001"               # 、
+    r".!?,;"                # ASCII equivalents
+    r"]+"
+)
+
+_MULTI_PAUSE_RE = re.compile(r"[，,、]{2,}")
+
+
+def _clean_for_tts(text: str) -> str:
+    text = _TTS_PAUSE_RE.sub("，", text)    # preserve rhythm at clause breaks
+    text = _normalize_enclosed(text)        # ①→1, Ⓐ→A before whitelist
+    text = _halfwidth(text)                 # Ａ→A, １→1
+    text = _TTS_SAFE_RE.sub("", text)       # strip everything not on whitelist
+    text = _MULTI_PAUSE_RE.sub("，", text)  # collapse consecutive pauses
+    text = re.sub(r" {2,}", " ", text)
+    return text.strip()
+
+
 class TalksplitAuto:
     """One-shot node: text in, paragraphs out."""
 
@@ -304,7 +402,7 @@ class TalksplitAuto:
         dps = depth_scores(sim)
         raw_threshold = threshold_for_sensitivity(dps, sensitivity)
         if use_markers:
-            dps = boost_depths(sentences, dps)
+            dps = boost_depths(sentences, dps, threshold=raw_threshold)
         target = target_paragraphs if target_paragraphs > 0 else None
         splits = optimize_boundaries(
             dps,
@@ -400,6 +498,7 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitAuto": TalksplitAuto,
     "TalksplitSplitToList": TalksplitSplitToList,
     "TalksplitPickParagraph": TalksplitPickParagraph,
+    "TalksplitCleanForTTS": TalksplitCleanForTTS,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -413,4 +512,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitAuto": "Talksplit · Auto",
     "TalksplitSplitToList": "Talksplit · Split to List",
     "TalksplitPickParagraph": "Talksplit · Pick Paragraph",
+    "TalksplitCleanForTTS": "Talksplit · Clean for TTS",
 }

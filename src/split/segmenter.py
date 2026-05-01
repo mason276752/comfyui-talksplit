@@ -14,6 +14,22 @@ _WS_RUN = re.compile(r"\s+")
 _CJK = r"[　-〿一-鿿＀-￯]"
 _CJK_GAP = re.compile(rf"(?<={_CJK}) (?={_CJK})")
 
+# Zero-width implicit break: split BEFORE these Chinese transition phrases
+# when they appear mid-text (not already at a newline boundary).
+# Covers temporal shifts, discourse markers, and answer/question openers
+# common in unpunctuated presentation transcripts.
+_ZH_IMPLICIT_RE = re.compile(
+    # Case 1: general discourse markers (must not be at a line start)
+    r"(?<=[^\n])(?="
+        r"以前(?!從|都|也|已|就)|現在開始|這時候問題|"
+        r"接下來|接著|另外|首先|其次|再來|再者|最後|總之|"
+        r"最壞的|次差的|"
+        r"答案(?:是|很|：)|而是因為"
+    r")"
+    # Case 2: 未來 as a discourse opener — not when preceded by 的 (prep phrase)
+    r"|(?<=[^\n的])(?=未來)"
+)
+
 
 @dataclass
 class Sentence:
@@ -45,31 +61,44 @@ def split_sentences(
     ``extra_terminators`` adds extra characters that should also end a piece.
     Pass ``SOFT_COMMA`` (or any subset) to allow paragraph splits to fall at
     commas — useful for long, comma-strung sentences.
+
+    Additionally, zero-width implicit breaks are inserted before common
+    Chinese transition phrases (e.g. 以前, 未來, 接下來) so that
+    unpunctuated presentation transcripts still produce meaningful sentence
+    units without any LLM pre-processing.
     """
     if extra_terminators:
         pattern = f"({_HARD_PATTERN}|[{re.escape(extra_terminators)}]+)"
         split_re = re.compile(pattern)
     else:
         split_re = _SPLIT_RE
-    sentences: list[Sentence] = []
-    pieces = split_re.split(text)
 
-    pos = 0
-    buf = ""
-    buf_start = 0
-    for piece in pieces:
-        if not piece:
+    # Collect cut points from both explicit terminators and implicit breaks.
+    # Explicit terminator at [m.start:m.end] → next sentence starts at m.end.
+    # Implicit break at m.start (zero-width)   → next sentence starts at m.start.
+    cut_points: list[int] = []
+    for m in split_re.finditer(text):
+        cut_points.append(m.end())
+    for m in _ZH_IMPLICIT_RE.finditer(text):
+        cut_points.append(m.start())
+    cut_points = sorted(set(cut_points))
+
+    sentences: list[Sentence] = []
+    prev = 0
+    for cp in cut_points:
+        if cp <= prev:
             continue
-        if buf == "":
-            buf_start = pos
-        buf += piece
-        pos += len(piece)
-        if split_re.fullmatch(piece):
-            _emit(sentences, buf, buf_start, chunk_long=False, fallback_chunk=fallback_chunk)
-            buf = ""
-    if buf:
-        # Leftover with no terminator — only here we fall back to chunking.
-        _emit(sentences, buf, buf_start, chunk_long=True, fallback_chunk=fallback_chunk)
+        chunk = text[prev:cp]
+        stripped = chunk.strip()
+        if stripped:
+            leading = len(chunk) - len(chunk.lstrip())
+            base = prev + leading
+            sentences.append(Sentence(stripped, base, base + len(stripped)))
+        prev = cp
+
+    # Leftover with no terminator — only here we fall back to chunking.
+    if prev < len(text):
+        _emit(sentences, text[prev:], prev, chunk_long=True, fallback_chunk=fallback_chunk)
     return sentences
 
 

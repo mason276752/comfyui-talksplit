@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     raw_threshold = threshold_for_sensitivity(depths, sensitivity)
 
     if not args.no_markers:
-        depths = boost_depths(sentences, depths)
+        depths = boost_depths(sentences, depths, threshold=raw_threshold)
 
     splits = optimize_boundaries(
         depths,
