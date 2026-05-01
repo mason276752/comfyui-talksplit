@@ -604,18 +604,20 @@ def _unpack_depths(bundle):
     return sim, dps, raw
 
 
-# Cache embedders so reusing the same model across nodes / runs doesn't
-# reload weights from disk every time.
+# LRU-1 embedder slot: keeps only the most recently used model loaded.
+# Switching to a different (model_name, device) pair evicts the previous
+# one so its SentenceTransformer weights (~2 GB for bge-m3) are released.
 _embedder_cache: dict[tuple[str, str], Embedder] = {}
 
 
 def _get_embedder(model_name: str, device: str) -> Embedder:
     key = (model_name, device or "")
-    cached = _embedder_cache.get(key)
-    if cached is None:
-        cached = Embedder(model_name=model_name, device=device or None)
-        _embedder_cache[key] = cached
-    return cached
+    if key in _embedder_cache:
+        return _embedder_cache[key]
+    # Evict every existing entry before loading the new model.
+    _embedder_cache.clear()
+    _embedder_cache[key] = Embedder(model_name=model_name, device=device or None)
+    return _embedder_cache[key]
 
 
 def _assemble(text: str, sentences: list[Sentence], splits: list[int]) -> str:
@@ -661,6 +663,7 @@ def _plot_to_tensor(sim, depths, splits, threshold):
     plt.close(fig)
     buf.seek(0)
     img = Image.open(buf).convert("RGB")
+    buf.close()  # convert() copied pixels; buf no longer needed
     arr = np.asarray(img).astype(np.float32) / 255.0
     return torch.from_numpy(arr).unsqueeze(0)
 
