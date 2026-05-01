@@ -228,15 +228,15 @@ class TalksplitSplitToList:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("paragraph",)
-    OUTPUT_IS_LIST = (True,)
+    RETURN_TYPES = ("STRING", "INT")
+    RETURN_NAMES = ("paragraph", "index")
+    OUTPUT_IS_LIST = (True, True)
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
     def run(self, paragraphs: str):
         items = [p.strip() for p in paragraphs.split("\n\n") if p.strip()]
-        return (items,)
+        return (items, list(range(len(items))))
 
 
 class TalksplitPickParagraph:
@@ -366,6 +366,39 @@ def _clean_for_tts(text: str) -> str:
     return text.strip()
 
 
+class TalksplitTrimSilence:
+    """裁掉單段 AUDIO 頭尾的靜音，讓 TalksplitRepeatImageForAudio 的圖片時長精確對齊。"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "threshold_db": ("FLOAT", {"default": -40.0, "min": -80.0, "max": -10.0, "step": 1.0}),
+                "pad_ms": ("INT", {"default": 50, "min": 0, "max": 500, "step": 10}),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "run"
+    CATEGORY = _CATEGORY
+
+    def run(self, audio, threshold_db: float, pad_ms: int):
+        import torch
+        waveform = audio["waveform"]          # [1, C, T]
+        sr = audio["sample_rate"]
+        mono = waveform[0].abs().max(dim=0).values  # [T]
+        threshold = 10 ** (threshold_db / 20)
+        mask = mono > threshold
+        if not mask.any():
+            return (audio,)
+        pad = int(pad_ms / 1000 * sr)
+        first = max(0, mask.nonzero()[0].item() - pad)
+        last  = min(waveform.shape[2], mask.nonzero()[-1].item() + pad + 1)
+        return ({"waveform": waveform[:, :, first:last], "sample_rate": sr},)
+
+
 class TalksplitConcatAudio:
     """Concatenate a list of AUDIO objects along the time axis (dim=2).
 
@@ -398,7 +431,10 @@ class TalksplitRepeatImageForAudio:
                                    AUDIO_i  ┴→ TalksplitRepeatImageForAudio → [n_frames, H, W, C]
 
     Then VHS_Unbatch collects all per-paragraph frame batches and concatenates them,
-    and VHS_Unbatch does the same for audio, before feeding into VHS_VideoCombine.
+    and TalksplitConcatAudio does the same for audio, before feeding into VHS_VideoCombine.
+
+    zoom_start / zoom_end: Ken Burns effect. 1.0 = original, 1.2 = 20% zoomed in.
+    Setting both to 1.0 disables zoom (default, no effect).
     """
 
     @classmethod
@@ -408,7 +444,12 @@ class TalksplitRepeatImageForAudio:
                 "image": ("IMAGE",),
                 "audio": ("AUDIO",),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 120, "step": 1}),
-            }
+                "zoom_start": ("FLOAT", {"default": 1.0, "min": 1.0, "max": 2.0, "step": 0.01}),
+                "zoom_end":   ("FLOAT", {"default": 1.0, "min": 1.0, "max": 2.0, "step": 0.01}),
+            },
+            "optional": {
+                "index": ("INT", {"default": 0, "forceInput": True}),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -416,14 +457,42 @@ class TalksplitRepeatImageForAudio:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, image, audio, fps: int):
+    def run(self, image, audio, fps: int, zoom_start: float, zoom_end: float, index: int = 0):
         import torch
+        import torch.nn.functional as F
+
         duration = audio["waveform"].size(2) / audio["sample_rate"]
         n_frames = max(1, math.ceil(duration * fps))
-        # image shape: [B, H, W, C] — take first frame if batch > 1
-        frame = image[0:1]
-        repeated = frame.expand(n_frames, -1, -1, -1).clone()
-        return (repeated,)
+
+        # image shape: [B, H, W, C] — take first frame
+        frame = image[0]  # [H, W, C]
+        H, W, C = frame.shape
+
+        # 奇數段落交換 zoom 方向（交替 zoom in / zoom out）
+        if zoom_start != zoom_end and index % 2 == 1:
+            zoom_start, zoom_end = zoom_end, zoom_start
+
+        if zoom_start == 1.0 and zoom_end == 1.0:
+            # Fast path: no zoom, just repeat
+            repeated = frame.unsqueeze(0).expand(n_frames, -1, -1, -1).clone()
+            return (repeated,)
+
+        # Ken Burns: interpolate zoom factor per frame, crop centre, resize
+        frames = []
+        for i in range(n_frames):
+            t = i / max(n_frames - 1, 1)
+            zoom = zoom_start + (zoom_end - zoom_start) * t
+            crop_h = max(1, int(H / zoom))
+            crop_w = max(1, int(W / zoom))
+            top  = (H - crop_h) // 2
+            left = (W - crop_w) // 2
+            cropped = frame[top:top + crop_h, left:left + crop_w, :]  # [ch, cw, C]
+            # [1, C, ch, cw] → interpolate → [1, C, H, W]
+            t_in = cropped.permute(2, 0, 1).unsqueeze(0)
+            t_out = F.interpolate(t_in, size=(H, W), mode="bilinear", align_corners=False)
+            frames.append(t_out.squeeze(0).permute(1, 2, 0))
+
+        return (torch.stack(frames),)
 
 
 class TalksplitAuto:
@@ -570,6 +639,7 @@ NODE_CLASS_MAPPINGS = {
     "TalksplitSplitToList": TalksplitSplitToList,
     "TalksplitPickParagraph": TalksplitPickParagraph,
     "TalksplitCleanForTTS": TalksplitCleanForTTS,
+    "TalksplitTrimSilence": TalksplitTrimSilence,
     "TalksplitConcatAudio": TalksplitConcatAudio,
     "TalksplitRepeatImageForAudio": TalksplitRepeatImageForAudio,
 }
@@ -586,6 +656,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "TalksplitSplitToList": "Talksplit · Split to List",
     "TalksplitPickParagraph": "Talksplit · Pick Paragraph",
     "TalksplitCleanForTTS": "Talksplit · Clean for TTS",
+    "TalksplitTrimSilence": "Talksplit · Trim Silence",
     "TalksplitConcatAudio": "Talksplit · Concat Audio",
     "TalksplitRepeatImageForAudio": "Talksplit · Repeat Image for Audio",
 }
