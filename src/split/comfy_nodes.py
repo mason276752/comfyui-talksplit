@@ -599,6 +599,7 @@ class TalksplitBuildVideo:
                 "segment": ("SEGMENT_VIDEO",),
                 "audio":   ("AUDIO",),
                 "filename_prefix": ("STRING", {"default": "talksplit_video"}),
+                "save_output": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -609,7 +610,7 @@ class TalksplitBuildVideo:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, segment, audio, filename_prefix):
+    def run(self, segment, audio, filename_prefix, save_output=False):
         import os
         import subprocess
         import tempfile
@@ -619,19 +620,26 @@ class TalksplitBuildVideo:
 
         # INPUT_IS_LIST wraps widget values in a list too
         prefix = filename_prefix[0] if isinstance(filename_prefix, list) else filename_prefix
+        save_output = save_output[0] if isinstance(save_output, list) else save_output
 
         try:
             import folder_paths
-            output_dir = folder_paths.get_output_directory()
+            if save_output:
+                dest_dir = folder_paths.get_output_directory()
+                dest_type = "output"
+            else:
+                dest_dir = folder_paths.get_temp_directory()
+                dest_type = "temp"
         except ImportError:
-            output_dir = tempfile.gettempdir()
+            dest_dir = tempfile.gettempdir()
+            dest_type = "temp"
 
         tmp   = tempfile.gettempdir()
         rid   = uuid.uuid4().hex
         concat_list  = os.path.join(tmp, f"talksplit_concat_{rid}.txt")
         merged_video = os.path.join(tmp, f"talksplit_merged_{rid}.mp4")
         audio_wav    = os.path.join(tmp, f"talksplit_audio_{rid}.wav")
-        final_video  = os.path.join(output_dir, f"{prefix}_{rid[:8]}.mp4")
+        final_video  = os.path.join(dest_dir, f"{prefix}_{rid[:8]}.mp4")
 
         try:
             import comfy.utils
@@ -698,7 +706,7 @@ class TalksplitBuildVideo:
         print(f"[TalksplitBuildVideo] saved → {final_video}")
         return {
             "ui":     {"videos": [{"filename": os.path.basename(final_video),
-                                   "subfolder": "", "type": "output"}]},
+                                   "subfolder": "", "type": dest_type}]},
             "result": (final_video,),
         }
 
