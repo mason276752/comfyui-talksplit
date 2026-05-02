@@ -734,15 +734,6 @@ class TalksplitBuildVideo:
             waveforms = [a["waveform"] for a in audio]
             combined  = torch.cat(waveforms, dim=2)  # [1, C, total_T]
             sr        = audio[0]["sample_rate"]
-
-            # xfade 每個過渡從影片扣掉 F 秒，音訊保持原長 → 結尾對不齊。
-            # 提前將音訊截到與影片等長，避免最後一段語音被 -shortest 截斷。
-            if transition_duration > 0.0 and len(segment) > 1:
-                video_dur = sum(durations) - (len(segment) - 1) * transition_duration
-                max_samples = int(video_dur * sr)
-                if combined.shape[2] > max_samples:
-                    combined = combined[:, :, :max_samples]
-
             torchaudio.save(audio_wav, combined[0], sr)  # [C, T]
             del waveforms, combined
             if pbar:
@@ -937,20 +928,30 @@ def _build_xfade_filterchain(durations: list, fade_dur: float) -> tuple:
     Offset formula: for transition between segment i and i+1,
       offset_i = sum(durations[0..i]) - (i+1) * fade_dur
     This ensures the crossfade starts fade_dur seconds before segment i ends.
+
+    The last segment is padded with tpad=stop_mode=clone to compensate for the
+    (N-1)*fade_dur seconds that xfade removes from total video duration, so that
+    video duration == audio duration and neither stream is truncated.
     """
     N = len(durations)
     if N == 1:
         return "[0:v]null[vout]", "[vout]"
 
     parts = []
+    # tpad the last segment: hold its last frame for (N-1)*fade_dur extra seconds
+    # so total video duration = Σdurations (matches audio concat length exactly)
+    extension = (N - 1) * fade_dur
+    parts.append(f"[{N - 1}:v]tpad=stop_mode=clone:stop_duration={extension:.3f}[vlast]")
+
     cumulative = 0.0
     prev = "[0:v]"
     for i in range(N - 1):
         cumulative += durations[i]
         offset = max(0.0, cumulative - fade_dur * (i + 1))
+        next_in = "[vlast]" if i == N - 2 else f"[{i + 1}:v]"
         out = "[vout]" if i == N - 2 else f"[v{i + 1}]"
         parts.append(
-            f"{prev}[{i + 1}:v]xfade=transition=fade:duration={fade_dur:.3f}:offset={offset:.4f}{out}"
+            f"{prev}{next_in}xfade=transition=fade:duration={fade_dur:.3f}:offset={offset:.4f}{out}"
         )
         prev = out
     return ";".join(parts), "[vout]"
