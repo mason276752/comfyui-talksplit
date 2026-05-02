@@ -734,6 +734,15 @@ class TalksplitBuildVideo:
             waveforms = [a["waveform"] for a in audio]
             combined  = torch.cat(waveforms, dim=2)  # [1, C, total_T]
             sr        = audio[0]["sample_rate"]
+
+            # xfade 每個過渡從影片扣掉 F 秒，音訊保持原長 → 結尾對不齊。
+            # 提前將音訊截到與影片等長，避免最後一段語音被 -shortest 截斷。
+            if transition_duration > 0.0 and len(segment) > 1:
+                video_dur = sum(durations) - (len(segment) - 1) * transition_duration
+                max_samples = int(video_dur * sr)
+                if combined.shape[2] > max_samples:
+                    combined = combined[:, :, :max_samples]
+
             torchaudio.save(audio_wav, combined[0], sr)  # [C, T]
             del waveforms, combined
             if pbar:
