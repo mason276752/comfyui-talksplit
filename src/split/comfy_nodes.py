@@ -485,6 +485,9 @@ class TalksplitRepeatImageForAudio:
             },
             "optional": {
                 "index": ("INT", {"default": 0, "forceInput": True}),
+                "transition_duration": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 3.0, "step": 0.1,
+                    "tooltip": "設為與 TalksplitBuildVideo 相同的值。讓每段影片延長此秒數，"
+                               "供 xfade 疊化使用，避免最後一幀凍結。0 = 不延長。"}),
             },
         }
 
@@ -493,7 +496,7 @@ class TalksplitRepeatImageForAudio:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, image, audio, fps: int, zoom_start: float, zoom_end: float, index: int = 0):
+    def run(self, image, audio, fps: int, zoom_start: float, zoom_end: float, index: int = 0, transition_duration: float = 0.0):
         import os
         import subprocess
         import tempfile
@@ -502,7 +505,7 @@ class TalksplitRepeatImageForAudio:
         import torch.nn.functional as F
 
         duration = audio["waveform"].size(2) / audio["sample_rate"]
-        n_frames = max(1, math.ceil(duration * fps))
+        n_frames = max(1, math.ceil((duration + transition_duration) * fps))
 
         # image shape: [B, H, W, C] — take first frame, clamp to [0,1]
         frame = image[0].cpu().clamp(0.0, 1.0)  # [H, W, C]
@@ -688,12 +691,15 @@ class TalksplitBuildVideo:
         except Exception:
             pbar = None
 
+        # 提前計算音訊時長：用於 xfade offset 和 mux 截斷
+        audio_durations = [a["waveform"].shape[2] / a["sample_rate"] for a in audio]
+        audio_total = sum(audio_durations)
+
         try:
             # ── Step 1: concat / xfade video segments ────────────────────────
             if transition_duration > 0.0 and len(segment) > 1:
-                # xfade crossfade: query each segment duration, then chain with xfade filter
-                durations = [_get_video_duration(seg) for seg in segment]
-                fc, out_label = _build_xfade_filterchain(durations, transition_duration)
+                # xfade crossfade: offset 用音訊時長，不需要 ffprobe
+                fc, out_label = _build_xfade_filterchain(audio_durations, transition_duration)
                 input_args = []
                 for seg_path in segment:
                     input_args += ["-i", seg_path]
@@ -740,13 +746,14 @@ class TalksplitBuildVideo:
                 pbar.update(1)
 
             # ── Step 3: mux audio into video ──────────────────────────────────
+            # -t audio_total: 截到精確音訊長度，移除 xfade 多出的 transition_duration 秒
             result = subprocess.run(
                 ["ffmpeg", "-y",
                  "-i", merged_video,
                  "-i", audio_wav,
                  "-c:v", "copy",
                  "-c:a", "aac", "-b:a", "192k",
-                 "-shortest",
+                 "-t", f"{audio_total:.6f}",
                  final_video],
                 capture_output=True,
             )
@@ -908,50 +915,33 @@ def _plot_to_tensor(sim, depths, splits, threshold):
     return torch.from_numpy(arr).unsqueeze(0)
 
 
-def _get_video_duration(path: str) -> float:
-    """Return the duration of a video file in seconds using ffprobe."""
-    import subprocess
-    r = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", path],
-        capture_output=True, text=True,
-    )
-    return float(r.stdout.strip())
 
-
-def _build_xfade_filterchain(durations: list, fade_dur: float) -> tuple:
+def _build_xfade_filterchain(audio_durations: list, fade_dur: float) -> tuple:
     """Build an ffmpeg filter_complex string that chains xfade across N video inputs.
 
     Each input is labelled [0:v], [1:v], ... as usual.
     Returns (filter_complex_string, output_label).
 
-    Offset formula: for transition between segment i and i+1,
-      offset_i = sum(durations[0..i]) - (i+1) * fade_dur
-    This ensures the crossfade starts fade_dur seconds before segment i ends.
+    Offset formula: offset_i = Σaudio[0..i]
+    (crossfade starts exactly when segment i's audio ends)
 
-    The last segment is padded with tpad=stop_mode=clone to compensate for the
-    (N-1)*fade_dur seconds that xfade removes from total video duration, so that
-    video duration == audio duration and neither stream is truncated.
+    Each segment file must be audio_duration + fade_dur long so xfade has a
+    fade-in/out buffer. TalksplitRepeatImageForAudio extends by transition_duration
+    to satisfy this. The final output is Σaudio + fade_dur seconds; the caller
+    trims it to Σaudio with -t in the mux step.
     """
-    N = len(durations)
+    N = len(audio_durations)
     if N == 1:
         return "[0:v]null[vout]", "[vout]"
 
     parts = []
-    # tpad the last segment: hold its last frame for (N-1)*fade_dur extra seconds
-    # so total video duration = Σdurations (matches audio concat length exactly)
-    extension = (N - 1) * fade_dur
-    parts.append(f"[{N - 1}:v]tpad=stop_mode=clone:stop_duration={extension:.3f}[vlast]")
-
     cumulative = 0.0
     prev = "[0:v]"
     for i in range(N - 1):
-        cumulative += durations[i]
-        offset = max(0.0, cumulative - fade_dur * (i + 1))
-        next_in = "[vlast]" if i == N - 2 else f"[{i + 1}:v]"
+        cumulative += audio_durations[i]
         out = "[vout]" if i == N - 2 else f"[v{i + 1}]"
         parts.append(
-            f"{prev}{next_in}xfade=transition=fade:duration={fade_dur:.3f}:offset={offset:.4f}{out}"
+            f"{prev}[{i + 1}:v]xfade=transition=fade:duration={fade_dur:.3f}:offset={cumulative:.4f}{out}"
         )
         prev = out
     return ";".join(parts), "[vout]"
