@@ -367,7 +367,12 @@ def _clean_for_tts(text: str) -> str:
 
 
 class TalksplitTrimSilence:
-    """裁掉 AUDIO 中的靜音段（頭、尾及中間），讓 TalksplitRepeatImageForAudio 的圖片時長精確對齊。"""
+    """移除 AUDIO 中的靜音段（頭、尾、及超過 min_silence_ms 的中間靜音）。
+
+    用途：TTS 有時在段落中間未生成內容，留下大段假靜音；
+    本節點移除這些假靜音，讓圖片時長精確對齊實際語音。
+    自然停頓（< min_silence_ms）保持不動。
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -375,9 +380,10 @@ class TalksplitTrimSilence:
             "required": {
                 "audio": ("AUDIO",),
                 "threshold_db": ("FLOAT", {"default": -40.0, "min": -80.0, "max": -10.0, "step": 1.0}),
-                "pad_ms": ("INT", {"default": 50, "min": 0, "max": 500, "step": 10}),
-                "min_silence_ms": ("INT", {"default": 200, "min": 0, "max": 2000, "step": 10,
-                                           "tooltip": "短於此長度的靜音不會被移除，避免刪掉正常停頓。設為 0 則移除所有靜音。"}),
+                "pad_ms": ("INT", {"default": 50, "min": 0, "max": 500, "step": 10,
+                    "tooltip": "在每段語音邊緣保留的緩衝（毫秒），避免截掉起音/收音。"}),
+                "min_silence_ms": ("INT", {"default": 500, "min": 50, "max": 5000, "step": 50,
+                    "tooltip": "短於此長度的靜音視為自然停頓，不移除。預設 500ms。"}),
             }
         }
 
@@ -392,48 +398,39 @@ class TalksplitTrimSilence:
         sr = audio["sample_rate"]
         mono = waveform[0].abs().max(dim=0).values  # [T]
         threshold = 10 ** (threshold_db / 20)
-        mask = mono > threshold                # True = 有聲
-        if not mask.any():
+        mask = (mono > threshold).float()
+        if mask.sum() == 0:
             return (audio,)
 
-        pad = int(pad_ms / 1000 * sr)
-        min_silence_samples = int(min_silence_ms / 1000 * sr)
         T = waveform.shape[2]
+        pad = int(pad_ms / 1000 * sr)
+        min_sil = int(min_silence_ms / 1000 * sr)
 
-        # 找出所有「有聲區間」的起止點（含 pad）
-        segments = []
-        in_speech = False
-        seg_start = 0
-        for i, v in enumerate(mask.tolist()):
-            if v and not in_speech:
-                in_speech = True
-                seg_start = i
-            elif not v and in_speech:
-                in_speech = False
-                segments.append((seg_start, i))
-        if in_speech:
-            segments.append((seg_start, T))
+        # 用 diff 向量化偵測語音起止邊界（不用 Python 逐樣本迴圈）
+        # mask_ext: 在頭尾各補一個 0，方便偵測首尾邊界
+        mask_ext = torch.cat([mask.new_zeros(1), mask, mask.new_zeros(1)])
+        diff = mask_ext[1:] - mask_ext[:-1]   # 長度 T+1
+        # diff[i]=+1 → sample i 開始有聲；diff[i]=-1 → sample i 開始無聲
+        starts = (diff > 0).nonzero(as_tuple=True)[0].tolist()
+        ends   = (diff < 0).nonzero(as_tuple=True)[0].tolist()
+        # 此時 segment k 的有聲範圍為 [starts[k], ends[k])
 
-        if not segments:
-            return (audio,)
+        # 合併間距小於 min_sil 的相鄰片段（保留自然停頓）
+        merged_s = [starts[0]]
+        merged_e = [ends[0]]
+        for s, e in zip(starts[1:], ends[1:]):
+            if s - merged_e[-1] < min_sil:
+                merged_e[-1] = e          # 合併：延伸前一段的結尾
+            else:
+                merged_s.append(s)
+                merged_e.append(e)
 
-        # 合併間距小於 min_silence_samples 的相鄰片段
-        if min_silence_samples > 0:
-            merged = [segments[0]]
-            for start, end in segments[1:]:
-                if start - merged[-1][1] < min_silence_samples:
-                    merged[-1] = (merged[-1][0], end)
-                else:
-                    merged.append((start, end))
-            segments = merged
-
-        # 套用 pad，拼接所有片段
+        # 套用 pad，拼接所有語音片段
         chunks = []
-        for start, end in segments:
-            s = max(0, start - pad)
-            e = min(T, end + pad)
-            chunks.append(waveform[:, :, s:e])
-
+        for s, e in zip(merged_s, merged_e):
+            cs = max(0, s - pad)
+            ce = min(T, e + pad)
+            chunks.append(waveform[:, :, cs:ce])
         combined = torch.cat(chunks, dim=2)
         return ({"waveform": combined, "sample_rate": sr},)
 
