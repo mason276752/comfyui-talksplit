@@ -1,6 +1,6 @@
 {
-  "last_node_id": 12,
-  "last_link_id": 15,
+  "last_node_id": 14,
+  "last_link_id": 18,
   "nodes": [
     {
       "id": 1,
@@ -20,14 +20,7 @@
       "properties": {"Node name for S&R": "TalksplitAuto"},
       "widgets_values": [
         "今天我們來聊一個很特別的主題：宇宙的起源。\n在宇宙大爆炸之前，時間與空間都不存在。\n大約一百四十億年前，一切從一個無限小的奇點開始膨脹。\n接下來讓我們討論星系的形成。\n氣體和塵埃在重力的作用下逐漸聚集，形成最初的恆星。\n數十億個恆星聚集在一起，形成了像銀河系這樣的巨大星系。\n最後，我們來看看地球與生命的誕生。\n地球在大約四十六億年前形成，早期的地球環境極為惡劣。\n隨著時間流逝，海洋中出現了最原始的生命形式，開啟了生物演化的旅程。",
-        1.0,
-        2,
-        15,
-        0,
-        "BAAI/bge-m3",
-        true,
-        false,
-        3
+        1.0, 2, 15, 0, "BAAI/bge-m3", true, false, 3
       ]
     },
     {
@@ -73,17 +66,12 @@
       "order": 3,
       "mode": 0,
       "outputs": [
-        {"name": "model", "type": "CUSTOM", "links": [13], "shape": 3, "slot_index": 0},
+        {"name": "model",     "type": "CUSTOM", "links": [13], "shape": 3, "slot_index": 0},
         {"name": "tokenizer", "type": "CUSTOM", "links": [14], "shape": 3, "slot_index": 1}
       ],
       "title": "Local LLM Loader (HF format)",
       "properties": {"Node name for S&R": "LLM_local_loader"},
-      "widgets_values": [
-        "Qwen/Qwen2.5-3B-Instruct",
-        "cpu",
-        "float32",
-        false
-      ]
+      "widgets_values": ["Qwen/Qwen2.5-3B-Instruct", "cuda", "float16", false]
     },
     {
       "id": 11,
@@ -94,95 +82,122 @@
       "order": 4,
       "mode": 0,
       "inputs": [
-        {"name": "model", "type": "CUSTOM", "link": 13},
-        {"name": "tokenizer", "type": "CUSTOM", "link": 14},
+        {"name": "model",             "type": "CUSTOM", "link": 13},
+        {"name": "tokenizer",         "type": "CUSTOM", "link": 14},
         {"name": "user_prompt_input", "type": "STRING", "link": 15}
       ],
       "outputs": [
         {"name": "assistant_response", "type": "STRING", "links": [2], "shape": 3, "slot_index": 0},
-        {"name": "history", "type": "STRING", "links": [], "shape": 3, "slot_index": 1},
-        {"name": "tool", "type": "STRING", "links": [], "shape": 3, "slot_index": 2},
-        {"name": "image", "type": "IMAGE", "links": [], "shape": 3, "slot_index": 3}
+        {"name": "history",            "type": "STRING", "links": [], "shape": 3, "slot_index": 1},
+        {"name": "tool",               "type": "STRING", "links": [], "shape": 3, "slot_index": 2},
+        {"name": "image",              "type": "IMAGE",  "links": [], "shape": 3, "slot_index": 3}
       ],
       "title": "LLM: Chinese -> Image Prompt",
       "properties": {"Node name for S&R": "LLM_local"},
       "widgets_values": [
-        "You are an image prompt engineer.\nConvert the given Chinese paragraph into a concise English Stable Diffusion prompt.\nOutput ONLY the prompt keywords, no explanation, no extra text.\nFormat: subject, art style, lighting, mood, quality tags.\nKeep it under 60 words.\nExample output: vast galaxy with colorful nebula, cinematic lighting, digital painting, dramatic atmosphere, 8k, highly detailed",
-        "",
-        "LLM",
-        0.8,
-        512,
-        "disable",
-        "disable",
-        "enable"
+        "You are a cinematic scene writer for Flux image generation.\nConvert the given Chinese paragraph into a vivid English image description.\nOutput ONLY the description. No explanation, no labels, no extra text.\n\nRules:\n- Write in natural descriptive sentences, NOT comma-separated tags\n- Describe a specific real-world moment a camera could capture: who is doing what, where, in what light\n- Translate abstract ideas into visible human actions or environments\n- Avoid objects with text on them: no currency, no signs, no books with visible text\n- Avoid multiple faces in one frame to prevent anatomy errors\n- Keep under 60 words\n\nExample output: A tired entrepreneur sits alone at a wooden desk late at night, reviewing a pile of documents under a single warm lamp, expression focused and weary, shallow depth of field, cinematic wide shot, muted earth tones",
+        "", "LLM", 0.7, 512, "disable", "disable", "enable"
       ]
     },
     {
       "id": 3,
-      "type": "CheckpointLoaderSimple",
+      "type": "UNETLoader",
       "pos": [80, 760],
-      "size": [380, 100],
+      "size": [380, 82],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
+      "inputs": [],
       "outputs": [
-        {"name": "MODEL", "type": "MODEL", "links": [3], "shape": 3, "slot_index": 0},
-        {"name": "CLIP", "type": "CLIP", "links": [4, 5], "shape": 3, "slot_index": 1},
-        {"name": "VAE", "type": "VAE", "links": [6], "shape": 3, "slot_index": 2}
+        {"name": "MODEL", "type": "MODEL", "links": [3], "shape": 3, "slot_index": 0}
       ],
-      "properties": {"Node name for S&R": "CheckpointLoaderSimple"},
-      "widgets_values": ["sd_xl_base_1.0.safetensors"]
+      "properties": {"Node name for S&R": "UNETLoader"},
+      "widgets_values": ["flux_dev_fp8_scaled_diffusion_model.safetensors", "default"]
+    },
+    {
+      "id": 13,
+      "type": "CLIPLoader",
+      "pos": [80, 900],
+      "size": [380, 106],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "CLIP", "type": "CLIP", "links": [16, 17], "shape": 3, "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "CLIPLoader"},
+      "widgets_values": [
+        "text_encoders/t5/google_t5-v1_1-xxl_encoderonly-fp16.safetensors",
+        "flux",
+        "default"
+      ]
+    },
+    {
+      "id": 14,
+      "type": "VAELoader",
+      "pos": [80, 1060],
+      "size": [380, 58],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {"name": "VAE", "type": "VAE", "links": [18], "shape": 3, "slot_index": 0}
+      ],
+      "properties": {"Node name for S&R": "VAELoader"},
+      "widgets_values": ["flux_ae.safetensors"]
     },
     {
       "id": 4,
-      "type": "CLIPTextEncode",
+      "type": "CLIPTextEncodeFlux",
       "pos": [1600, 200],
-      "size": [420, 160],
+      "size": [420, 200],
       "flags": {},
       "order": 5,
       "mode": 0,
       "inputs": [
-        {"name": "text", "type": "STRING", "link": 2},
-        {"name": "clip", "type": "CLIP", "link": 4}
+        {"name": "clip",  "type": "CLIP",   "link": 16},
+        {"name": "t5xxl", "type": "STRING", "link": 2}
       ],
       "outputs": [
         {"name": "CONDITIONING", "type": "CONDITIONING", "links": [7], "shape": 3, "slot_index": 0}
       ],
       "title": "Positive Prompt (LLM output)",
-      "properties": {"Node name for S&R": "CLIPTextEncode"},
-      "widgets_values": []
+      "properties": {"Node name for S&R": "CLIPTextEncodeFlux"},
+      "widgets_values": ["", 3.5]
     },
     {
       "id": 5,
-      "type": "CLIPTextEncode",
-      "pos": [1600, 440],
-      "size": [420, 160],
+      "type": "CLIPTextEncodeFlux",
+      "pos": [1600, 460],
+      "size": [420, 200],
       "flags": {},
-      "order": 6,
+      "order": 5,
       "mode": 0,
       "inputs": [
-        {"name": "clip", "type": "CLIP", "link": 5}
+        {"name": "clip", "type": "CLIP", "link": 17}
       ],
       "outputs": [
         {"name": "CONDITIONING", "type": "CONDITIONING", "links": [8], "shape": 3, "slot_index": 0}
       ],
       "title": "Negative Prompt",
-      "properties": {"Node name for S&R": "CLIPTextEncode"},
-      "widgets_values": ["low quality, blurry, text, watermark, deformed, ugly"]
+      "properties": {"Node name for S&R": "CLIPTextEncodeFlux"},
+      "widgets_values": ["", "blurry, distorted anatomy, watermark, text overlay, low quality", 3.5]
     },
     {
       "id": 6,
       "type": "EmptyLatentImage",
-      "pos": [1600, 660],
+      "pos": [1600, 700],
       "size": [300, 130],
       "flags": {},
-      "order": 7,
+      "order": 5,
       "mode": 0,
       "outputs": [
         {"name": "LATENT", "type": "LATENT", "links": [9], "shape": 3, "slot_index": 0}
       ],
       "properties": {"Node name for S&R": "EmptyLatentImage"},
-      "widgets_values": [1024, 1024, 1]
+      "widgets_values": [1920, 1080, 1]
     },
     {
       "id": 7,
@@ -190,19 +205,19 @@
       "pos": [2100, 200],
       "size": [380, 340],
       "flags": {},
-      "order": 8,
+      "order": 6,
       "mode": 0,
       "inputs": [
-        {"name": "model", "type": "MODEL", "link": 3},
-        {"name": "positive", "type": "CONDITIONING", "link": 7},
-        {"name": "negative", "type": "CONDITIONING", "link": 8},
-        {"name": "latent_image", "type": "LATENT", "link": 9}
+        {"name": "model",        "type": "MODEL",        "link": 3},
+        {"name": "positive",     "type": "CONDITIONING", "link": 7},
+        {"name": "negative",     "type": "CONDITIONING", "link": 8},
+        {"name": "latent_image", "type": "LATENT",       "link": 9}
       ],
       "outputs": [
         {"name": "LATENT", "type": "LATENT", "links": [10], "shape": 3, "slot_index": 0}
       ],
       "properties": {"Node name for S&R": "KSampler"},
-      "widgets_values": [42, "randomize", 25, 5.0, "dpmpp_2m", "karras", 1.0]
+      "widgets_values": [42, "randomize", 20, 1.0, "euler", "simple", 1.0]
     },
     {
       "id": 8,
@@ -210,11 +225,11 @@
       "pos": [2560, 200],
       "size": [240, 80],
       "flags": {},
-      "order": 9,
+      "order": 7,
       "mode": 0,
       "inputs": [
         {"name": "samples", "type": "LATENT", "link": 10},
-        {"name": "vae", "type": "VAE", "link": 6}
+        {"name": "vae",     "type": "VAE",    "link": 18}
       ],
       "outputs": [
         {"name": "IMAGE", "type": "IMAGE", "links": [11], "shape": 3, "slot_index": 0}
@@ -228,7 +243,7 @@
       "pos": [2880, 200],
       "size": [320, 140],
       "flags": {},
-      "order": 10,
+      "order": 8,
       "mode": 0,
       "inputs": [
         {"name": "images", "type": "IMAGE", "link": 11}
@@ -239,11 +254,8 @@
   ],
   "links": [
     [1,  1,  0,  2,  0, "STRING"],
-    [2,  11, 0,  4,  0, "STRING"],
+    [2,  11, 0,  4,  1, "STRING"],
     [3,  3,  0,  7,  0, "MODEL"],
-    [4,  3,  1,  4,  1, "CLIP"],
-    [5,  3,  1,  5,  0, "CLIP"],
-    [6,  3,  2,  8,  1, "VAE"],
     [7,  4,  0,  7,  1, "CONDITIONING"],
     [8,  5,  0,  7,  2, "CONDITIONING"],
     [9,  6,  0,  7,  3, "LATENT"],
@@ -252,7 +264,10 @@
     [12, 2,  0,  12, 0, "STRING"],
     [13, 10, 0,  11, 0, "CUSTOM"],
     [14, 10, 1,  11, 1, "CUSTOM"],
-    [15, 12, 0,  11, 2, "STRING"]
+    [15, 12, 0,  11, 2, "STRING"],
+    [16, 13, 0,  4,  0, "CLIP"],
+    [17, 13, 0,  5,  0, "CLIP"],
+    [18, 14, 0,  8,  1, "VAE"]
   ],
   "groups": [],
   "config": {},

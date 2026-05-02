@@ -367,7 +367,7 @@ def _clean_for_tts(text: str) -> str:
 
 
 class TalksplitTrimSilence:
-    """裁掉單段 AUDIO 頭尾的靜音，讓 TalksplitRepeatImageForAudio 的圖片時長精確對齊。"""
+    """裁掉 AUDIO 中的靜音段（頭、尾及中間），讓 TalksplitRepeatImageForAudio 的圖片時長精確對齊。"""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -376,6 +376,8 @@ class TalksplitTrimSilence:
                 "audio": ("AUDIO",),
                 "threshold_db": ("FLOAT", {"default": -40.0, "min": -80.0, "max": -10.0, "step": 1.0}),
                 "pad_ms": ("INT", {"default": 50, "min": 0, "max": 500, "step": 10}),
+                "min_silence_ms": ("INT", {"default": 200, "min": 0, "max": 2000, "step": 10,
+                                           "tooltip": "短於此長度的靜音不會被移除，避免刪掉正常停頓。設為 0 則移除所有靜音。"}),
             }
         }
 
@@ -384,19 +386,56 @@ class TalksplitTrimSilence:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, audio, threshold_db: float, pad_ms: int):
+    def run(self, audio, threshold_db: float, pad_ms: int, min_silence_ms: int):
         import torch
         waveform = audio["waveform"]          # [1, C, T]
         sr = audio["sample_rate"]
         mono = waveform[0].abs().max(dim=0).values  # [T]
         threshold = 10 ** (threshold_db / 20)
-        mask = mono > threshold
+        mask = mono > threshold                # True = 有聲
         if not mask.any():
             return (audio,)
+
         pad = int(pad_ms / 1000 * sr)
-        first = max(0, mask.nonzero()[0].item() - pad)
-        last  = min(waveform.shape[2], mask.nonzero()[-1].item() + pad + 1)
-        return ({"waveform": waveform[:, :, first:last], "sample_rate": sr},)
+        min_silence_samples = int(min_silence_ms / 1000 * sr)
+        T = waveform.shape[2]
+
+        # 找出所有「有聲區間」的起止點（含 pad）
+        segments = []
+        in_speech = False
+        seg_start = 0
+        for i, v in enumerate(mask.tolist()):
+            if v and not in_speech:
+                in_speech = True
+                seg_start = i
+            elif not v and in_speech:
+                in_speech = False
+                segments.append((seg_start, i))
+        if in_speech:
+            segments.append((seg_start, T))
+
+        if not segments:
+            return (audio,)
+
+        # 合併間距小於 min_silence_samples 的相鄰片段
+        if min_silence_samples > 0:
+            merged = [segments[0]]
+            for start, end in segments[1:]:
+                if start - merged[-1][1] < min_silence_samples:
+                    merged[-1] = (merged[-1][0], end)
+                else:
+                    merged.append((start, end))
+            segments = merged
+
+        # 套用 pad，拼接所有片段
+        chunks = []
+        for start, end in segments:
+            s = max(0, start - pad)
+            e = min(T, end + pad)
+            chunks.append(waveform[:, :, s:e])
+
+        combined = torch.cat(chunks, dim=2)
+        return ({"waveform": combined, "sample_rate": sr},)
 
 
 class TalksplitConcatAudio:
@@ -601,6 +640,8 @@ class TalksplitBuildVideo:
                 "filename_prefix": ("STRING", {"default": "talksplit_video"}),
                 "frame_rate": ("INT", {"default": 24, "min": 1, "max": 120, "step": 1}),
                 "save_output": ("BOOLEAN", {"default": False}),
+                "transition_duration": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 3.0, "step": 0.1,
+                    "tooltip": "Crossfade duration between segments (seconds). 0 = hard cut (fast bitstream copy)."}),
             }
         }
 
@@ -611,7 +652,7 @@ class TalksplitBuildVideo:
     FUNCTION = "run"
     CATEGORY = _CATEGORY
 
-    def run(self, segment, audio, filename_prefix, frame_rate=24, save_output=False):
+    def run(self, segment, audio, filename_prefix, frame_rate=24, save_output=False, transition_duration=0.5):
         import os
         import subprocess
         import tempfile
@@ -620,9 +661,10 @@ class TalksplitBuildVideo:
         import torchaudio
 
         # INPUT_IS_LIST wraps widget values in a list too
-        prefix      = filename_prefix[0] if isinstance(filename_prefix, list) else filename_prefix
-        frame_rate  = frame_rate[0]      if isinstance(frame_rate, list)      else frame_rate
-        save_output = save_output[0]     if isinstance(save_output, list)     else save_output
+        prefix               = filename_prefix[0]       if isinstance(filename_prefix, list)       else filename_prefix
+        frame_rate           = frame_rate[0]            if isinstance(frame_rate, list)            else frame_rate
+        save_output          = save_output[0]           if isinstance(save_output, list)           else save_output
+        transition_duration  = transition_duration[0]   if isinstance(transition_duration, list)   else transition_duration
 
         try:
             import folder_paths
@@ -650,18 +692,37 @@ class TalksplitBuildVideo:
             pbar = None
 
         try:
-            # ── Step 1: concat video segments (bitstream copy, no decode) ──────
-            with open(concat_list, "w") as f:
+            # ── Step 1: concat / xfade video segments ────────────────────────
+            if transition_duration > 0.0 and len(segment) > 1:
+                # xfade crossfade: query each segment duration, then chain with xfade filter
+                durations = [_get_video_duration(seg) for seg in segment]
+                fc, out_label = _build_xfade_filterchain(durations, transition_duration)
+                input_args = []
                 for seg_path in segment:
-                    f.write(f"file '{seg_path}'\n")
+                    input_args += ["-i", seg_path]
+                result = subprocess.run(
+                    ["ffmpeg", "-y"] + input_args + [
+                        "-filter_complex", fc,
+                        "-map", out_label,
+                        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                        "-crf", "18", "-preset", "fast",
+                        merged_video,
+                    ],
+                    capture_output=True,
+                )
+            else:
+                # Hard cut: bitstream copy concat (no re-encode, fast)
+                with open(concat_list, "w") as f:
+                    for seg_path in segment:
+                        f.write(f"file '{seg_path}'\n")
+                result = subprocess.run(
+                    ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                     "-i", concat_list, "-c", "copy", merged_video],
+                    capture_output=True,
+                )
 
-            result = subprocess.run(
-                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                 "-i", concat_list, "-c", "copy", merged_video],
-                capture_output=True,
-            )
             if result.returncode != 0:
-                raise RuntimeError(f"ffmpeg concat failed:\n{result.stderr.decode(errors='replace')}")
+                raise RuntimeError(f"ffmpeg video combine failed:\n{result.stderr.decode(errors='replace')}")
 
             # Delete segment files now that they are merged
             for seg_path in segment:
@@ -669,7 +730,6 @@ class TalksplitBuildVideo:
                     os.remove(seg_path)
                 except OSError:
                     pass
-            os.remove(concat_list)
             if pbar:
                 pbar.update(1)
 
@@ -849,6 +909,45 @@ def _plot_to_tensor(sim, depths, splits, threshold):
     buf.close()  # convert() copied pixels; buf no longer needed
     arr = np.asarray(img).astype(np.float32) / 255.0
     return torch.from_numpy(arr).unsqueeze(0)
+
+
+def _get_video_duration(path: str) -> float:
+    """Return the duration of a video file in seconds using ffprobe."""
+    import subprocess
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True,
+    )
+    return float(r.stdout.strip())
+
+
+def _build_xfade_filterchain(durations: list, fade_dur: float) -> tuple:
+    """Build an ffmpeg filter_complex string that chains xfade across N video inputs.
+
+    Each input is labelled [0:v], [1:v], ... as usual.
+    Returns (filter_complex_string, output_label).
+
+    Offset formula: for transition between segment i and i+1,
+      offset_i = sum(durations[0..i]) - (i+1) * fade_dur
+    This ensures the crossfade starts fade_dur seconds before segment i ends.
+    """
+    N = len(durations)
+    if N == 1:
+        return "[0:v]null[vout]", "[vout]"
+
+    parts = []
+    cumulative = 0.0
+    prev = "[0:v]"
+    for i in range(N - 1):
+        cumulative += durations[i]
+        offset = max(0.0, cumulative - fade_dur * (i + 1))
+        out = "[vout]" if i == N - 2 else f"[v{i + 1}]"
+        parts.append(
+            f"{prev}[{i + 1}:v]xfade=transition=fade:duration={fade_dur:.3f}:offset={offset:.4f}{out}"
+        )
+        prev = out
+    return ";".join(parts), "[vout]"
 
 
 NODE_CLASS_MAPPINGS = {
